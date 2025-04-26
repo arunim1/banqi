@@ -285,15 +285,24 @@ function BanqiGame({ socket, gameCode, isCreator }) {
     });
 
     socket.on('gameStateUpdate', (data) => {
-      console.log('Game state update:', data);
+      console.log('Game state update received from server:', data);
+      
+      // Important: Update board state first
       setBoard(data.board);
 
-      // Determine if it's my turn based on the playerTurn socket ID
+      // CRITICAL: Determine if it's my turn based on the server's playerTurn ID
       const isMyTurnNow = data.playerTurn === socket.id;
+      console.log(`Turn status: ${isMyTurnNow ? 'MY TURN' : 'NOT MY TURN'}, playerTurn: ${data.playerTurn}, myId: ${socket.id}`);
+      
+      // Update client state atomically to avoid race conditions
       setIsMyTurn(isMyTurnNow);
-
-      // Update the current active player's color (whose turn it is)
       setCurrentTurn(data.currentPlayer);
+
+      // Clear any selections when turn changes
+      if (selectedPiece && !isMyTurnNow) {
+        setSelectedPiece(null);
+        setValidMoveSquares({ validMoves: [], captureableMoves: [] });
+      }
 
       // Update message based on whose turn it is
       if (data.currentPlayer) {
@@ -306,7 +315,7 @@ function BanqiGame({ socket, gameCode, isCreator }) {
     });
 
     socket.on('move', (data) => {
-      console.log('Move received:', data);
+      console.log('Move response received from server:', data);
 
       // Handle first piece reveal which determines colors
       if (data.result && data.result.firstPiece) {
@@ -325,15 +334,31 @@ function BanqiGame({ socket, gameCode, isCreator }) {
         }
       }
 
-      // If move failed, show error message
+      // If move failed, show error message 
       if (data.result && !data.result.valid) {
-        setMessage(`Invalid move: ${data.result.message}`);
+        console.log('Move was invalid:', data.result.message);
+        setMessage(`Invalid move: ${data.result.message || 'Unknown error'}`);
+        
+        // Provide visual feedback for invalid move
+        const moveFeedback = document.getElementById('move-feedback');
+        if (moveFeedback) {
+          moveFeedback.textContent = 'Invalid Move';
+          moveFeedback.classList.remove('hidden');
+          setTimeout(() => moveFeedback.classList.add('hidden'), 1500);
+        }
       }
 
       // If a piece was captured, show message
       if (data.result && data.result.capturedPiece) {
         const captured = data.result.capturedPiece;
         setMessage(`${captured.color.toUpperCase()} ${captured.type} was captured!`);
+      }
+      
+      // If the move includes updated turn information, sync our state immediately
+      if (data.result && data.result.playerTurn) {
+        const isMyTurnNow = data.result.playerTurn === socket.id;
+        console.log(`Turn changed in move response: ${isMyTurnNow ? 'MY TURN' : 'NOT MY TURN'}`);
+        setIsMyTurn(isMyTurnNow);
       }
     });
 
@@ -455,6 +480,12 @@ function BanqiGame({ socket, gameCode, isCreator }) {
   // Handle square click
   const handleSquareClick = (row, col) => {
     if (!board || gamePhase !== 'playing') return;
+    
+    // First, check if it's actually my turn
+    if (!isMyTurn) {
+      console.log('Ignoring click - not my turn');
+      return;
+    }
 
     const piece = board[row][col];
 
@@ -507,8 +538,29 @@ function BanqiGame({ socket, gameCode, isCreator }) {
       const isValidMove = validMoveSquares.validMoves.some(([r, c]) => r === row && c === col);
       const isCapture = validMoveSquares.captureableMoves.some(([r, c]) => r === row && c === col);
 
+      // Log the move attempt for debugging
+      console.log('Move attempt details:', {
+        from: { row: selectedPiece.row, col: selectedPiece.col },
+        to: { row, col },
+        piece: board[selectedPiece.row][selectedPiece.col],
+        targetPiece: board[row][col],
+        isValidMove,
+        isCapture,
+        validMoves: validMoveSquares.validMoves,
+        captureableMoves: validMoveSquares.captureableMoves,
+        playerColor,
+        isMyTurn
+      });
+
       if (isValidMove || isCapture) {
-        console.log(`Moving from ${selectedPiece.row},${selectedPiece.col} to ${row},${col}`);
+        console.log(`Sending move from ${selectedPiece.row},${selectedPiece.col} to ${row},${col}`);
+        // Animate the source square to give feedback
+        const sourceElement = document.getElementById(`square-${selectedPiece.row}-${selectedPiece.col}`);
+        if (sourceElement) {
+          sourceElement.classList.add('animate-pulse');
+          setTimeout(() => sourceElement.classList.remove('animate-pulse'), 500);
+        }
+        
         socket.emit('move', {
           fromRow: selectedPiece.row,
           fromCol: selectedPiece.col,
@@ -571,7 +623,10 @@ function BanqiGame({ socket, gameCode, isCreator }) {
   
   return (
     <div className="flex flex-col items-center justify-center">
-      <div className="mb-4 p-3 bg-amber-100 rounded-lg text-amber-800 font-medium">
+      <div className="relative mb-4 p-3 bg-amber-100 rounded-lg text-amber-800 font-medium">
+        <div id="move-feedback" className="hidden absolute top-0 left-0 w-full bg-red-500 text-white text-center font-bold py-1 rounded-t-lg transition-opacity">
+          Invalid Move
+        </div>
         {message}
         {playerColor && (
           <div className="mt-2 text-sm flex justify-between items-center">
@@ -580,6 +635,7 @@ function BanqiGame({ socket, gameCode, isCreator }) {
                 {playerColor.toUpperCase()}
               </span>
               <br></br>
+              {isMyTurn && <span className="text-green-600 font-bold">(Your Turn)</span>}
             </div>
             <div className="flex items-center gap-2">
               <div className={`w-4 h-4 rounded-full ${playerColor === 'red' ? 'bg-red-600' : 'bg-gray-800'}`}></div>
@@ -596,6 +652,7 @@ function BanqiGame({ socket, gameCode, isCreator }) {
           {board.map((row, rowIndex) => 
             row.map((piece, colIndex) => (
               <div 
+                id={`square-${rowIndex}-${colIndex}`}
                 key={`${rowIndex}-${colIndex}`}
                 onClick={() => handleSquareClick(rowIndex, colIndex)}
                 className={`
@@ -606,7 +663,7 @@ function BanqiGame({ socket, gameCode, isCreator }) {
                   ${validMoveSquares.validMoves.some(([r, c]) => r === rowIndex && c === colIndex) ? 'ring-2 ring-gray-500' : ''}
                   ${validMoveSquares.captureableMoves.some(([r, c]) => r === rowIndex && c === colIndex) ? 'ring-2 ring-green-500' : ''}
                   ${piece && piece.faceUp ? (piece.color === 'red' ? 'text-red-600' : 'text-gray-800') : 'text-amber-800'}
-                  transition-all duration-200 hover:bg-amber-300
+                  transition-all duration-200 hover:bg-amber-300 hover:scale-105
                 `}
               >
                 {getPieceSymbol(piece)}

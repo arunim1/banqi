@@ -17,6 +17,9 @@ const activeGames = new Map();
 // Store Banqi game states shared across all sockets
 const banqiGames = new Map();
 
+// Store which player controls which color
+const playerColors = new Map();
+
 // Game types
 const GAME_TYPE = 'banqi';
 
@@ -62,12 +65,38 @@ function generateBanqiBoard() {
 
 // Helper to evaluate capture legality
 function canCapture(attacker, defender) {
-  if (!attacker || !defender) return false;
-  if (attacker.color === defender.color) return false;
+  // First log the pieces involved in the capture attempt
+  console.log('Capture attempt:', {
+    attacker: { type: attacker.type, color: attacker.color, rank: attacker.rank },
+    defender: { type: defender.type, color: defender.color, rank: defender.rank }
+  });
+  
+  // Basic validation
+  if (!attacker || !defender) {
+    console.log('Capture invalid: Missing piece');
+    return false;
+  }
+  
+  if (attacker.color === defender.color) {
+    console.log('Capture invalid: Same color');
+    return false;
+  }
+  
   // Soldier / General special rule
-  if (attacker.type === 'SOLDIER' && defender.type === 'GENERAL') return true;
-  if (attacker.type === 'GENERAL' && defender.type === 'SOLDIER') return false;
-  return attacker.rank >= defender.rank;
+  if (attacker.type === 'SOLDIER' && defender.type === 'GENERAL') {
+    console.log('Capture valid: Soldier can capture General (special rule)');
+    return true;
+  }
+  
+  if (attacker.type === 'GENERAL' && defender.type === 'SOLDIER') {
+    console.log('Capture invalid: General cannot capture Soldier (special rule)');
+    return false;
+  }
+  
+  // Regular rank comparison - higher rank can capture lower rank
+  const canCaptureByRank = attacker.rank >= defender.rank;
+  console.log(`Capture ${canCaptureByRank ? 'valid' : 'invalid'}: Rank comparison ${attacker.rank} >= ${defender.rank} = ${canCaptureByRank}`);
+  return canCaptureByRank;
 }
 
 // Helper to check cannon capture path: exactly one screen piece between source and target along same row/col
@@ -266,14 +295,27 @@ io.on('connection', socket => {
       const isFirstReveal = isReveal && !gameState.firstPieceRevealed;
       const isPlayerTurn = gameState.playerTurn === socket.id;
       
-      // Debug logs for turn verification
-      console.log("Move validation info:");
-      console.log("Move from socket ID:", socket.id);
-      console.log("Current playerTurn:", gameState.playerTurn);
-      console.log("Is player's turn?", isPlayerTurn);
-      console.log("Is first reveal?", isFirstReveal);
+      // Get this player's assigned color (if any)
+      const playerAssignedColor = playerColors.get(socket.id);
+      
+      // Detailed debug logs for move validation
+      console.log("Move validation details:", {
+        moveType: isReveal ? 'reveal' : 'move/capture',
+        from: { row: data.fromRow, col: data.fromCol },
+        to: { row: data.toRow, col: data.toCol },
+        socketId: socket.id,
+        playerTurn: gameState.playerTurn,
+        isPlayerTurn,
+        isFirstReveal,
+        serverCurrentPlayer: gameState.currentPlayer,
+        playerAssignedColor,
+        firstPieceRevealed: gameState.firstPieceRevealed,
+        sourcePiece: gameState.board[data.fromRow]?.[data.fromCol],
+        targetPiece: gameState.board[data.toRow]?.[data.toCol]
+      });
       
       if (!isPlayerTurn) {
+        console.log("Move rejected: Not player's turn");
         // Not this player's turn, send invalid move
         socket.emit('move', {
           fromRow: data.fromRow,
@@ -310,7 +352,16 @@ io.on('connection', socket => {
           gameState.revealedPieces[pieceKey] = true;
           
           firstPiece = { color: piece.color };
-          console.log(`First piece revealed: ${piece.color} by player ${socket.id}`);
+          
+          // CRITICAL: Permanently associate this player with this color
+          playerColors.set(socket.id, piece.color);
+          
+          // Calculate opponent ID and color
+          const firstRevealOtherPlayerId = socket.id === gameState.player1 ? gameState.player2 : gameState.player1;
+          const otherPlayerColor = piece.color === 'red' ? 'black' : 'red';
+          playerColors.set(firstRevealOtherPlayerId, otherPlayerColor);
+          
+          console.log(`PLAYER COLOR ASSIGNMENT: ${socket.id} -> ${piece.color}, ${firstRevealOtherPlayerId} -> ${otherPlayerColor}`);
           
           // The player who revealed gets that color
           gameState.currentPlayer = piece.color;
@@ -355,42 +406,98 @@ io.on('connection', socket => {
         const sourcePiece = gameState.board[data.fromRow][data.fromCol];
         const targetPiece = gameState.board[data.toRow][data.toCol];
         
-        // Validate the move - source piece must be face up and belong to the player
-        if (sourcePiece && sourcePiece.faceUp && sourcePiece.color === gameState.currentPlayer) {
+        // Get this player's assigned color from the permanent mapping
+        const playerAssignedColor = playerColors.get(socket.id);
+        
+        // Validate the move - piece must match player's assigned color
+        console.log("Move validation - source piece check:", {
+          sourcePiece: sourcePiece ? { type: sourcePiece.type, color: sourcePiece.color, faceUp: sourcePiece.faceUp } : null,
+          serverCurrentPlayer: gameState.currentPlayer,
+          playerAssignedColor: playerAssignedColor,
+          socketId: socket.id,
+          matchesAssignedColor: sourcePiece ? (sourcePiece.color === playerAssignedColor) : false
+        });
+        
+        // Check if source piece belongs to this player's color AND it's this player's turn
+        if (sourcePiece && sourcePiece.faceUp && sourcePiece.color === playerAssignedColor && isPlayerTurn) {
           // Cannon movement/capture rules
           if (sourcePiece.type === 'CANNON') {
             // Cannon movement/capture rules
             if (targetPiece) {
               // capture attempt – must be opponent and path with exactly one screen
-              if (targetPiece.faceUp && targetPiece.color !== sourcePiece.color && cannonCanCapture(gameState.board, data.fromRow, data.fromCol, data.toRow, data.toCol)) {
-                capturedPiece = { ...targetPiece };
-                gameState.board[data.toRow][data.toCol] = sourcePiece;
-                gameState.board[data.fromRow][data.fromCol] = null;
-                moveValid = true;
-              }
+              if (targetPiece.faceUp && targetPiece.color !== sourcePiece.color) {
+                console.log("Cannon capture attempt:", {
+                  from: { row: data.fromRow, col: data.fromCol },
+                  to: { row: data.toRow, col: data.toCol },
+                  screenCheckNeeded: true
+                });
+                
+                const canCapture = cannonCanCapture(gameState.board, data.fromRow, data.fromCol, data.toRow, data.toCol);
+                
+                if (canCapture) {
+                  console.log("Valid cannon capture - exactly one screen found");
+                  capturedPiece = { ...targetPiece };
+                  gameState.board[data.toRow][data.toCol] = sourcePiece;
+                  gameState.board[data.fromRow][data.fromCol] = null;
+                  moveValid = true;
+                } else {
+                  console.log("Invalid cannon capture - wrong number of screens");
+                }
+              } 
             } else {
               // Regular move: must be orthogonal exactly one square
-              const isOrthogonal = (Math.abs(data.toRow - data.fromRow) === 1 && data.toCol === data.fromCol) || (data.toRow === data.fromRow && Math.abs(data.toCol - data.fromCol) === 1);
+              const rowDiff = Math.abs(data.toRow - data.fromRow);
+              const colDiff = Math.abs(data.toCol - data.fromCol);
+              const isOrthogonal = (rowDiff === 1 && colDiff === 0) || (rowDiff === 0 && colDiff === 1);
+              
               if (isOrthogonal) {
+                console.log("Valid cannon move to empty square");
                 gameState.board[data.toRow][data.toCol] = sourcePiece;
                 gameState.board[data.fromRow][data.fromCol] = null;
                 moveValid = true;
+              } else {
+                console.log("Invalid cannon move: not orthogonal or not adjacent", { rowDiff, colDiff });
               }
             }
           } else {
             // Non-cannon pieces
-            const isOrthogonal = (Math.abs(data.toRow - data.fromRow) === 1 && data.toCol === data.fromCol) || (data.toRow === data.fromRow && Math.abs(data.toCol - data.fromCol) === 1);
+            const rowDiff = Math.abs(data.toRow - data.fromRow);
+            const colDiff = Math.abs(data.toCol - data.fromCol);
+            const isOrthogonal = (rowDiff === 1 && colDiff === 0) || (rowDiff === 0 && colDiff === 1);
+            
+            console.log("Non-cannon move check:", {
+              rowDiff,
+              colDiff, 
+              isOrthogonal,
+              hasTargetPiece: !!targetPiece
+            });
+            
             if (isOrthogonal) {
               if (!targetPiece) {
                 // move to empty
+                console.log("Valid move to empty square");
                 gameState.board[data.toRow][data.toCol] = sourcePiece;
                 gameState.board[data.fromRow][data.fromCol] = null;
                 moveValid = true;
-              } else if (targetPiece.faceUp && canCapture(sourcePiece, targetPiece)) {
-                capturedPiece = { ...targetPiece };
-                gameState.board[data.toRow][data.toCol] = sourcePiece;
-                gameState.board[data.fromRow][data.fromCol] = null;
-                moveValid = true;
+              } else if (targetPiece.faceUp && targetPiece.color !== sourcePiece.color) {
+                // First verify that it's an opponent's piece
+                console.log("Attempting to capture piece:", {
+                  attacker: { type: sourcePiece.type, color: sourcePiece.color, rank: sourcePiece.rank },
+                  defender: { type: targetPiece.type, color: targetPiece.color, rank: targetPiece.rank }
+                });
+                
+                // Check if capture is valid according to game rules
+                const captureValid = canCapture(sourcePiece, targetPiece);
+                console.log("Capture validity check result:", captureValid);
+                
+                if (captureValid) {
+                  capturedPiece = { ...targetPiece };
+                  gameState.board[data.toRow][data.toCol] = sourcePiece;
+                  gameState.board[data.fromRow][data.fromCol] = null;
+                  moveValid = true;
+                } else {
+                  console.log("Capture rejected: Invalid by rank comparison");
+                }
               }
             }
           }
@@ -399,13 +506,27 @@ io.on('connection', socket => {
       
       // Only emit the move to all players if it was valid
       if (moveValid) {
+        console.log("Move validated successfully");
+        
         // First update the game state - increment turn and switch player
         gameState.turnCount++;
-        // Switch current player color
-        gameState.currentPlayer = gameState.currentPlayer === 'red' ? 'black' : 'red';
-        // Toggle socket turn
+        
+        // Toggle to the other player's turn
         const otherPlayerId = socket.id === gameState.player1 ? gameState.player2 : gameState.player1;
         gameState.playerTurn = otherPlayerId;
+        
+        // Set current player color based on whose turn it is next
+        const nextPlayerColor = playerColors.get(otherPlayerId);
+        gameState.currentPlayer = nextPlayerColor;
+        
+        console.log("Turn switched to:", {
+          player: otherPlayerId,
+          color: nextPlayerColor,
+          player1Id: gameState.player1,
+          player1Color: playerColors.get(gameState.player1),
+          player2Id: gameState.player2,
+          player2Color: playerColors.get(gameState.player2)
+        });
 
         // Then emit the move event with the updated player turn
         io.to(room).emit('move', {
@@ -441,6 +562,17 @@ io.on('connection', socket => {
     // Reset Banqi game state
     if (banqiGames.has(room)) {
       const gameState = banqiGames.get(room);
+      
+      // Reset player color assignments for this room
+      const player1Id = gameState.player1;
+      const player2Id = gameState.player2;
+      if (player1Id && playerColors.has(player1Id)) {
+        playerColors.delete(player1Id);
+      }
+      if (player2Id && playerColors.has(player2Id)) {
+        playerColors.delete(player2Id);
+      }
+      
       // Re-generate a fresh board
       gameState.board = generateBanqiBoard();
       gameState.firstPieceRevealed = false;
@@ -451,6 +583,8 @@ io.on('connection', socket => {
       gameState.revealedPieces = {};
       // Randomly assign next starting player
       gameState.playerTurn = Math.random() < 0.5 ? gameState.player1 : gameState.player2;
+      
+      console.log('Game reset, player colors cleared');
     }
     
     io.to(room).emit('reset', { gameType: GAME_TYPE });
@@ -472,6 +606,12 @@ io.on('connection', socket => {
     // Notify remaining player that opponent left
     io.to(room).emit('opponentLeft');
     io.to(room).emit('reset');
+    
+    // Clean up player color assignments
+    if (playerColors.has(socket.id)) {
+      console.log(`Cleaning up player color: ${socket.id} -> ${playerColors.get(socket.id)}`);
+      playerColors.delete(socket.id);
+    }
     
     // Clean up game if this was the creator
     const gameInfo = activeGames.get(room);
