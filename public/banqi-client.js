@@ -1,5 +1,5 @@
 // Banqi Game Client with React
-// This file combines the React UI from banqi.tsx with the socket.io integration
+// This file provides a React-based UI integrated with socket.io for multiplayer functionality
 
 const { useState, useEffect, useRef } = React;
 

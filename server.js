@@ -1,4 +1,4 @@
-// Multi-game server supporting Tic-Tac-Toe and Banqi
+// Banqi game server
 // Run with:  node server.js
 import express from 'express';
 import { createServer } from 'http';
@@ -18,10 +18,7 @@ const activeGames = new Map();
 const banqiGames = new Map();
 
 // Game types
-const GAME_TYPES = {
-  TTT: 'tictactoe',
-  BANQI: 'banqi'
-};
+const GAME_TYPE = 'banqi';
 
 // === Helper: generate a fresh shuffled Banqi board ===
 function generateBanqiBoard() {
@@ -99,8 +96,8 @@ io.on('connection', socket => {
   socket.on('createGame', (data = {}) => {
     console.log('Create game request received', data);
     
-    // Determine game type (default to tic-tac-toe if not specified)
-    const gameType = data.gameType || GAME_TYPES.TTT;
+    // Verify game type is banqi
+    const gameType = GAME_TYPE;
     
     // Generate a unique game code
     const gameCode = crypto.randomUUID().substring(0, 8);
@@ -133,7 +130,7 @@ io.on('connection', socket => {
     socket.emit('gameCreated', responseData);
     
     // If this is a Banqi game, create the initial shared board and game state
-    if (gameType === GAME_TYPES.BANQI) {
+    if (gameType === GAME_TYPE) {
       const board = generateBanqiBoard();
       banqiGames.set(gameCode, {
         board,
@@ -154,7 +151,7 @@ io.on('connection', socket => {
   socket.on('joinGame', (data) => {
     // Handle both string and object formats for backward compatibility
     const gameCode = typeof data === 'string' ? data : data.code;
-    const gameType = typeof data === 'string' ? GAME_TYPES.TTT : (data.gameType || GAME_TYPES.TTT);
+    const gameType = GAME_TYPE;
     
     // Check if game exists
     if (!activeGames.has(gameCode)) {
@@ -188,7 +185,7 @@ io.on('connection', socket => {
     socket.data.gameType = gameType;
     
     // For Banqi, register second player and randomly choose who goes first
-    if (gameType === GAME_TYPES.BANQI && banqiGames.has(room)) {
+    if (banqiGames.has(room)) {
       const gameState = banqiGames.get(room);
       gameState.player2 = socket.id;
       // Randomly decide which socket ID gets the first turn
@@ -203,16 +200,16 @@ io.on('connection', socket => {
     });
     
     // Start the game for both players
-    io.to(room).emit('start', { gameType: gameType });
-    io.to(room).emit('gameReady', { isReady: true, gameType: gameType });
+    io.to(room).emit('start', { gameType: GAME_TYPE });
+    io.to(room).emit('gameReady', { isReady: true, gameType: GAME_TYPE });
     
     // If this is a Banqi game, send the current game state
-    if (gameType === GAME_TYPES.BANQI && banqiGames.has(room)) {
+    if (banqiGames.has(room)) {
       const gameState = banqiGames.get(room);
       
       // Log debug info
       console.log("Game joined - Turn information:");
-      console.log("Creator Socket ID:", gameInfo.creator);
+      console.log("Creator Socket ID:", activeGames.get(room).creator);
       console.log("Joiner Socket ID:", socket.id);
       console.log("Current playerTurn:", gameState.playerTurn);
       
@@ -227,15 +224,9 @@ io.on('connection', socket => {
   socket.on('move', data => {
     if (!room) return;
     
-    const gameType = socket.data.gameType || GAME_TYPES.TTT;
+    const gameType = GAME_TYPE;
     
-    if (gameType === GAME_TYPES.TTT) {
-      // For Tic-Tac-Toe, data is just the position
-      io.to(room).emit('move', {
-        position: data,
-        player: socket.data.playerNumber
-      });
-    } else if (gameType === GAME_TYPES.BANQI) {
+    if (gameType === GAME_TYPE) {
       // For Banqi, data contains more information
       const isReveal = data.fromRow === data.toRow && data.fromCol === data.toCol;
       
@@ -291,7 +282,7 @@ io.on('connection', socket => {
           toCol: data.toCol,
           playerId: socket.id,
           player: socket.data.playerNumber,
-          gameType: GAME_TYPES.BANQI,
+          gameType: GAME_TYPE,
           result: { 
             valid: false,
             message: "Not your turn"
@@ -416,7 +407,7 @@ io.on('connection', socket => {
           toCol: data.toCol,
           playerId: socket.id,
           player: socket.data.playerNumber,
-          gameType: GAME_TYPES.BANQI,
+          gameType: GAME_TYPE,
           result: { 
             valid: true, 
             firstPiece: firstPiece,
@@ -446,10 +437,8 @@ io.on('connection', socket => {
   socket.on('reset', (data = {}) => {
     if (!room) return;
     
-    const gameType = data.gameType || socket.data.gameType || GAME_TYPES.TTT;
-    
-    // Reset Banqi game state if applicable
-    if (gameType === GAME_TYPES.BANQI && banqiGames.has(room)) {
+    // Reset Banqi game state
+    if (banqiGames.has(room)) {
       const gameState = banqiGames.get(room);
       // Re-generate a fresh board
       gameState.board = generateBanqiBoard();
@@ -463,10 +452,10 @@ io.on('connection', socket => {
       gameState.playerTurn = Math.random() < 0.5 ? gameState.player1 : gameState.player2;
     }
     
-    io.to(room).emit('reset', { gameType });
+    io.to(room).emit('reset', { gameType: GAME_TYPE });
     
-    // If this is a Banqi game, send the updated game state after reset
-    if (gameType === GAME_TYPES.BANQI && banqiGames.has(room)) {
+    // Send the updated game state after reset
+    if (banqiGames.has(room)) {
       const gameState = banqiGames.get(room);
       io.to(room).emit('gameStateUpdate', {
         board: gameState.board,
