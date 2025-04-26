@@ -399,7 +399,15 @@ io.on('connection', socket => {
       
       // Only emit the move to all players if it was valid
       if (moveValid) {
-        // First, emit the move event
+        // First update the game state - increment turn and switch player
+        gameState.turnCount++;
+        // Switch current player color
+        gameState.currentPlayer = gameState.currentPlayer === 'red' ? 'black' : 'red';
+        // Toggle socket turn
+        const otherPlayerId = socket.id === gameState.player1 ? gameState.player2 : gameState.player1;
+        gameState.playerTurn = otherPlayerId;
+
+        // Then emit the move event with the updated player turn
         io.to(room).emit('move', {
           fromRow: data.fromRow,
           fromCol: data.fromCol,
@@ -412,24 +420,17 @@ io.on('connection', socket => {
             valid: true, 
             firstPiece: firstPiece,
             currentPlayer: gameState.currentPlayer,
-            capturedPiece: capturedPiece
+            capturedPiece: capturedPiece,
+            playerTurn: gameState.playerTurn // Include updated player turn
           }
         });
         
-        // Then emit the full game state update to ensure synchronization
+        // Then emit the full game state update with the new turn information
         io.to(room).emit('gameStateUpdate', {
           board: gameState.board,
           currentPlayer: gameState.currentPlayer,
           playerTurn: gameState.playerTurn
         });
-        
-        // Switch current player and playerTurn
-        gameState.turnCount++;
-        // Switch current player color
-        gameState.currentPlayer = gameState.currentPlayer === 'red' ? 'black' : 'red';
-        // Toggle socket turn
-        const otherPlayerId = socket.id === gameState.player1 ? gameState.player2 : gameState.player1;
-        gameState.playerTurn = otherPlayerId;
       }
     }
   });

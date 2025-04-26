@@ -266,88 +266,89 @@ function BanqiGame({ socket, gameCode, isCreator }) {
   // Game state
   const [board, setBoard] = useState(null);
   const [selectedPiece, setSelectedPiece] = useState(null);
+  const [validMoveSquares, setValidMoveSquares] = useState({ validMoves: [], captureableMoves: [] });
   const [playerColor, setPlayerColor] = useState(null);
   const [opponentColor, setOpponentColor] = useState(null);
   const [currentTurn, setCurrentTurn] = useState(null);
-  const [isMyTurn, setIsMyTurn] = useState(false);
+  const [gamePhase, setGamePhase] = useState('waiting'); // 'waiting', 'playing', 'gameOver'
   const [message, setMessage] = useState("Waiting for opponent to join...");
-  const [gamePhase, setGamePhase] = useState('waiting');
-  
+  const [isMyTurn, setIsMyTurn] = useState(false);
+
   // Set up socket event listeners
   useEffect(() => {
     if (!socket) return;
-    
+
     socket.on('gameReady', (data) => {
       console.log('Game is ready:', data);
       setGamePhase('playing');
       setMessage("Game started! Click any piece to reveal it.");
     });
-    
+
     socket.on('gameStateUpdate', (data) => {
       console.log('Game state update:', data);
       setBoard(data.board);
-      
+
       // Determine if it's my turn based on the playerTurn socket ID
       const isMyTurnNow = data.playerTurn === socket.id;
       setIsMyTurn(isMyTurnNow);
-      
-      // Update the current player's color
+
+      // Update the current active player's color (whose turn it is)
       setCurrentTurn(data.currentPlayer);
-      
+
       // Update message based on whose turn it is
       if (data.currentPlayer) {
         if (isMyTurnNow) {
-          setMessage(`Your turn (${data.currentPlayer.toUpperCase()})`);
+          setMessage(`Your turn - ${playerColor ? playerColor.toUpperCase() : ''}`);
         } else {
-          setMessage(`Opponent's turn (${data.currentPlayer.toUpperCase()})`);
+          setMessage(`Opponent's turn - ${opponentColor ? opponentColor.toUpperCase() : ''}`);
         }
       }
     });
-    
+
     socket.on('move', (data) => {
       console.log('Move received:', data);
-      
+
       // Handle first piece reveal which determines colors
       if (data.result && data.result.firstPiece) {
         const firstPieceColor = data.result.firstPiece.color;
-        
+
         if (data.playerId === socket.id) {
-          // I revealed the first piece, so I play the opposite color
+          // I revealed the first piece, so I get that color
+          setPlayerColor(firstPieceColor);
+          setOpponentColor(firstPieceColor === 'red' ? 'black' : 'red');
+          console.log(`I revealed the first piece. My color is ${firstPieceColor} and will not change.`);
+        } else {
+          // Opponent revealed the first piece, so they get that color
           setPlayerColor(firstPieceColor === 'red' ? 'black' : 'red');
           setOpponentColor(firstPieceColor);
-        } else {
-          // Opponent revealed the first piece, so I play the opposite color
-          setPlayerColor(firstPieceColor === 'red' ? 'red' : 'black');
-          setOpponentColor(firstPieceColor === 'red' ? 'black' : 'red');
+          console.log(`Opponent revealed the first piece. My color is ${firstPieceColor === 'red' ? 'black' : 'red'} and will not change.`);
         }
-        
-        console.log(`First piece revealed: ${firstPieceColor}. My color: ${playerColor}`);
       }
-      
+
       // If move failed, show error message
       if (data.result && !data.result.valid) {
         setMessage(`Invalid move: ${data.result.message}`);
       }
-      
+
       // If a piece was captured, show message
       if (data.result && data.result.capturedPiece) {
         const captured = data.result.capturedPiece;
         setMessage(`${captured.color.toUpperCase()} ${captured.type} was captured!`);
       }
     });
-    
+
     socket.on('opponentLeft', () => {
       setMessage("Opponent left the game. Waiting for new player to join...");
       setGamePhase('waiting');
     });
-    
+
     socket.on('reset', () => {
       setMessage("Game has been reset. Click any piece to reveal it.");
       setSelectedPiece(null);
       setPlayerColor(null);
       setOpponentColor(null);
     });
-    
+
     // Clean up event listeners
     return () => {
       socket.off('gameReady');
@@ -357,17 +358,110 @@ function BanqiGame({ socket, gameCode, isCreator }) {
       socket.off('reset');
     };
   }, [socket]);
-  
+
+  // Calculate valid moves for a piece
+  const getValidMoves = (row, col) => {
+    if (!board) return [];
+
+    const piece = board[row][col];
+    if (!piece || !piece.faceUp || piece.color !== playerColor) return [];
+
+    const validMoves = [];
+    const captureableMoves = [];
+
+    // Check all four directions (up, right, down, left)
+    const directions = [[-1, 0], [0, 1], [1, 0], [0, -1]];
+
+    for (const [dr, dc] of directions) {
+      const newRow = row + dr;
+      const newCol = col + dc;
+
+      // Skip if position is off the board
+      if (newRow < 0 || newRow >= 4 || newCol < 0 || newCol >= 8) continue;
+
+      const targetPiece = board[newRow][newCol];
+
+      // Special case for Cannon
+      if (piece.type === 'CANNON') {
+        // For empty space, just check if it's adjacent
+        if (!targetPiece) {
+          validMoves.push([newRow, newCol]);
+          continue;
+        }
+
+        // For capture, check if there's exactly one piece to jump over
+        if (targetPiece.faceUp) {
+          let jumpRow = newRow;
+          let jumpCol = newCol;
+          let screenFound = false;
+          let moveFound = false;
+
+          while (true) {
+            jumpRow += dr;
+            jumpCol += dc;
+
+            // If off the board, break
+            if (jumpRow < 0 || jumpRow >= 4 || jumpCol < 0 || jumpCol >= 8) break;
+
+            const jumpTarget = board[jumpRow][jumpCol];
+
+            if (jumpTarget) {
+              if (screenFound) break; // Already found a screen
+
+              if (jumpTarget.faceUp && jumpTarget.color !== playerColor) {
+                captureableMoves.push([jumpRow, jumpCol]);
+                moveFound = true;
+              }
+
+              screenFound = true;
+            }
+
+            if (moveFound) break;
+          }
+        }
+      } else {
+        // For other pieces, check if the target is empty or has an opponent's piece
+        if (!targetPiece) {
+          validMoves.push([newRow, newCol]);
+        } else if (targetPiece.faceUp && targetPiece.color !== playerColor) {
+          // Check if the piece can capture the target
+          const ranks = {
+            'GENERAL': 7, 'ADVISOR': 6, 'ELEPHANT': 5, 'CHARIOT': 4,
+            'HORSE': 3, 'CANNON': 2, 'SOLDIER': 1
+          };
+
+          // Special rule: General cannot capture Soldier
+          if (piece.type === 'GENERAL' && targetPiece.type === 'SOLDIER') {
+            continue;
+          }
+
+          // Special rule: Soldier can capture General
+          if (piece.type === 'SOLDIER' && targetPiece.type === 'GENERAL') {
+            captureableMoves.push([newRow, newCol]);
+            continue;
+          }
+
+          // Regular rank comparison
+          if (ranks[piece.type] >= ranks[targetPiece.type]) {
+            captureableMoves.push([newRow, newCol]);
+          }
+        }
+      }
+    }
+
+    return { validMoves, captureableMoves };
+  };
+
   // Handle square click
   const handleSquareClick = (row, col) => {
     if (!board || gamePhase !== 'playing') return;
-    
+
     const piece = board[row][col];
-    
+
     // If no piece is selected yet
     if (!selectedPiece) {
-      // Case 1: Clicking on a face-down piece to reveal it
-      if (piece && !piece.faceUp && isMyTurn) {
+      // Case 1: Clicked on a face-down piece
+      if (piece && !piece.faceUp) {
         console.log(`Revealing piece at ${row},${col}`);
         socket.emit('move', {
           fromRow: row,
@@ -378,52 +472,64 @@ function BanqiGame({ socket, gameCode, isCreator }) {
         });
         return;
       }
-      
+
       // Case 2: Clicking on own face-up piece
       if (piece && piece.faceUp && piece.color === playerColor && isMyTurn) {
         setSelectedPiece({ row, col });
+        setValidMoveSquares(getValidMoves(row, col));
         setMessage(`Selected ${piece.type}. Click destination.`);
         return;
       }
-      
+
       return;
     }
-    
+
     // If a piece is already selected
-    
+
     // Case 1: Clicked on the same piece - deselect
     if (row === selectedPiece.row && col === selectedPiece.col) {
       setSelectedPiece(null);
       setMessage(isMyTurn ? `Your turn (${playerColor.toUpperCase()})` : `Opponent's turn (${opponentColor.toUpperCase()})`);
       return;
     }
-    
+
     // Case 2: Clicked on another of own pieces - select that instead
     if (piece && piece.faceUp && piece.color === playerColor && isMyTurn) {
       setSelectedPiece({ row, col });
+      setValidMoveSquares(getValidMoves(row, col));
       setMessage(`Selected ${piece.type}. Click destination.`);
       return;
     }
-    
+
     // Case 3: Attempt to move/capture
     if (isMyTurn) {
-      console.log(`Moving from ${selectedPiece.row},${selectedPiece.col} to ${row},${col}`);
-      socket.emit('move', {
-        fromRow: selectedPiece.row,
-        fromCol: selectedPiece.col,
-        toRow: row,
-        toCol: col,
-        gameType: 'banqi'
-      });
+      // Check if this is a valid move
+      const isValidMove = validMoveSquares.validMoves.some(([r, c]) => r === row && c === col);
+      const isCapture = validMoveSquares.captureableMoves.some(([r, c]) => r === row && c === col);
+
+      if (isValidMove || isCapture) {
+        console.log(`Moving from ${selectedPiece.row},${selectedPiece.col} to ${row},${col}`);
+        socket.emit('move', {
+          fromRow: selectedPiece.row,
+          fromCol: selectedPiece.col,
+          toRow: row,
+          toCol: col,
+          gameType: 'banqi'
+        });
+      } else {
+        setMessage('Invalid move. Select a highlighted square.');
+      }
       setSelectedPiece(null);
+      setValidMoveSquares({ validMoves: [], captureableMoves: [] });
     }
   };
-  
+
   // Get piece symbol for display
   const getPieceSymbol = (piece) => {
     if (!piece) return '';
     if (!piece.faceUp) return '?';
     
+    // Chinese symbols
     const symbols = {
       red: {
         'GENERAL': '帥', 'ADVISOR': '仕', 'ELEPHANT': '相', 
@@ -435,7 +541,21 @@ function BanqiGame({ socket, gameCode, isCreator }) {
       }
     };
     
-    return symbols[piece.color][piece.type];
+    // English abbreviations
+    const englishAbbr = {
+      'GENERAL': 'G', 'ADVISOR': 'A', 'ELEPHANT': 'E',
+      'CHARIOT': 'C', 'HORSE': 'H', 'SOLDIER': 'S', 'CANNON': 'N'
+    };
+    
+    const chineseSymbol = symbols[piece.color][piece.type];
+    const englishLetter = englishAbbr[piece.type];
+    
+    return (
+      <div className="flex flex-col items-center">
+        <div>{chineseSymbol}</div>
+        <div className="text-xs mt-[-5px]">{englishLetter}</div>
+      </div>
+    );
   };
   
   // If board hasn't been initialized yet
@@ -454,10 +574,19 @@ function BanqiGame({ socket, gameCode, isCreator }) {
       <div className="mb-4 p-3 bg-amber-100 rounded-lg text-amber-800 font-medium">
         {message}
         {playerColor && (
-          <div className="mt-2 text-sm">
-            You are playing as <span className={`font-bold ${playerColor === 'red' ? 'text-red-600' : 'text-gray-800'}`}>
-              {playerColor.toUpperCase()}
-            </span>
+          <div className="mt-2 text-sm flex justify-between items-center">
+            <div>
+              You are playing as <span className={`font-bold ${playerColor === 'red' ? 'text-red-600' : 'text-gray-800'}`}>
+                {playerColor.toUpperCase()}
+              </span>
+              <br></br>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className={`w-4 h-4 rounded-full ${playerColor === 'red' ? 'bg-red-600' : 'bg-gray-800'}`}></div>
+              <div className="text-xs">You</div>
+              <div className={`w-4 h-4 rounded-full ${opponentColor === 'red' ? 'bg-red-600' : 'bg-gray-800'}`}></div>
+              <div className="text-xs">Opponent</div>
+            </div>
           </div>
         )}
       </div>
@@ -474,6 +603,8 @@ function BanqiGame({ socket, gameCode, isCreator }) {
                   text-xl md:text-2xl font-bold rounded cursor-pointer
                   ${piece && !piece.faceUp ? 'bg-amber-600' : 'bg-amber-200'}
                   ${selectedPiece && selectedPiece.row === rowIndex && selectedPiece.col === colIndex ? 'ring-4 ring-yellow-400' : ''}
+                  ${validMoveSquares.validMoves.some(([r, c]) => r === rowIndex && c === colIndex) ? 'ring-2 ring-gray-500' : ''}
+                  ${validMoveSquares.captureableMoves.some(([r, c]) => r === rowIndex && c === colIndex) ? 'ring-2 ring-green-500' : ''}
                   ${piece && piece.faceUp ? (piece.color === 'red' ? 'text-red-600' : 'text-gray-800') : 'text-amber-800'}
                   transition-all duration-200 hover:bg-amber-300
                 `}
